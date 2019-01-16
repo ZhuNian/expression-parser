@@ -15,10 +15,8 @@ let rec print = (expr: expression) => {
   let res = "";
   switch (expr) {
   | Digital(d) => res ++ d
-  | Add(d1, d2) =>
-    res ++ "  " ++ "Add(" ++ print(d1) ++ "," ++ print(d2) ++ ")"
-  | Minus(d1, d2) =>
-    res ++ "  " ++ "Minus(" ++ print(d1) ++ "," ++ print(d2) ++ ")"
+  | Add(d1, d2) => res ++ "Add(" ++ print(d1) ++ "," ++ print(d2) ++ ")"
+  | Minus(d1, d2) => res ++ "Minus(" ++ print(d1) ++ "," ++ print(d2) ++ ")"
   };
 };
 /* let expr = Minus(Add(Digital("3"), Digital("5")), Digital("3")); */

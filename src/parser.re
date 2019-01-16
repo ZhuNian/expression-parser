@@ -1,103 +1,143 @@
 open Evaluate;
-type result =
-  | Ok(string, string)
+type result('a) =
+  | Ok('a, string)
   | Error(string);
 
-type parser = string => result;
+type parser = (expression, string) => result(expression);
+let (@|) = (p1, p2, input: string) => {
+  switch (p1(input)) {
+  | Ok(exp, remain) => Ok(exp, remain)
+  | Error(_) => p2(input)
+  };
+};
+
+let (@<<) = (onOk, onError, res) => {
+  switch (res) {
+  | Ok(r, remain) => onOk(r, remain)
+  | Error(err) => onError(err)
+  };
+};
+
+let isChar = (isChar_: string => bool, input: string) => {
+  let c = input |> Js.String.charAt(0);
+  if (isChar_(c)) {
+    Ok(c, input |> Js.String.slice(~from=1, ~to_=Js.String.length(input)));
+  } else {
+    Error(input);
+  };
+};
+
+let isDigitalChar = isChar(c => "0123456789" |> Js.String.includes(c));
+let isAddChar = isChar(c => c == "+");
+let isMinusChar = isChar(c => c == "-");
+let isEmptyChar = isChar(c => c == "");
+
+let digitalParser_ = (input: string) => {
+  input
+  |> isDigitalChar
+  |> ((c, remain) => Ok(Digital(c), remain))
+  @<< (err => Error(err));
+};
+
+let emptyParser = (input: string) => {
+  input |> isEmptyChar |> ((_, _) => Ok("", input)) @<< (_ => Error(input));
+};
+
+let rec many = (res, pChar, input: string) => {
+  input
+  |> emptyParser
+  |> ((_, _) => Error(input))
+  @<< (
+    e => {
+      e
+      |> pChar
+      |> (
+        (char_, remain) => {
+          remain
+          |> emptyParser
+          |> ((_, _) => Ok(res ++ char_, ""))
+          @<< (_ => many(res ++ char_, pChar, remain));
+        }
+      )
+      @<< (err => Ok(res, err));
+    }
+  );
+};
 
 let digitalParser = (input: string) => {
-  let c = input |> Js.String.charAt(0);
-  if ("0123456789" |> Js.String.includes(c)) {
-    Ok(c, input |> Js.String.slice(~from=1, ~to_=Js.String.length(input)));
-  } else {
-    Error("not digital");
-  };
-};
-
-let operatorParser = (input: string) => {
-  let c = input |> Js.String.charAt(0);
-  if (c == "+" || c == "-") {
-    Ok(c, input |> Js.String.slice(~from=1, ~to_=Js.String.length(input)));
-  } else {
-    Error("not known operator");
-  };
-};
-
-let validInputParser = (input: string) => {
-  switch (input) {
-  | "" => Error("empty string")
-  | _ => Ok(input, "")
-  };
-};
-
-let (@>) = (p1: parser, p2: parser, input: string) => {
-  switch (p1(input)) {
-  | Ok(current, _) => p2(current)
-  | Error(e) => Error(e)
-  };
-};
-
-let (@|) = (p1: parser, p2: parser, input: string) => {
-  switch (p1(input)) {
-  | Ok(current, _) => p2(current)
-  | Error(_) => Ok(input, "")
-  };
-};
-
-let rec many = (p: parser, input: string) => {
-  switch (input |> validInputParser @> p) {
-  | Ok(current, remaining) =>
-    switch (many(p, remaining)) {
-    | Ok(nextCurrent, nextRemaining) =>
-      Ok(current ++ nextCurrent, nextRemaining)
-    | Error(_) => Ok(current, remaining)
+  input
+  |> many("", isDigitalChar)
+  |> (
+    (d, remain) => {
+      d
+      |> emptyParser
+      |> ((_, _) => Error(input))
+      @<< (_ => Ok(Digital(d), remain));
     }
-  | Error(e) => Error(e)
-  };
+  )
+  @<< (_ => Error(input));
 };
 
-let rec parser = (~input: string, ~expr: option(expression)=?, ()) => {
-  input |> Js.log;
-  switch (input |> many(digitalParser)) {
-  | Ok(current, remaining) =>
-    switch (remaining |> validInputParser @| operatorParser) {
-    | Ok(current1, remaining1) =>
-      (
-        switch (expr) {
-        | Some(expr_) => (expr_, remaining1)
-        | None =>
-          switch (remaining1 |> many(digitalParser)) {
-          | Ok(current_, remaining_) => (Digital(current_), remaining_)
-          | Error(_) => Js.Exn.raiseError("next expr error")
-          }
-        }
-      )
-      |> (
-        ((expr_, remaining_)) => {
-          switch (current1) {
-          | "+" =>
-            parser(
-              ~input=remaining_,
-              ~expr=Add(expr_, Digital(current)),
-              (),
-            )
-          | "-" =>
-            parser(
-              ~input=remaining_,
-              ~expr=Minus(expr_, Digital(current)),
-              (),
-            )
-          | "" => expr_
-          | _ => Js.Exn.raiseError("parse error")
-          };
-        }
-      )
-
-    | Error(e) => Js.Exn.raiseError(e)
+let parserGenerator =
+    (
+      opSplitter,
+      onOk: (expression, expression) => expression,
+      exp1: expression,
+      input: string,
+    ) => {
+  input
+  |> opSplitter
+  |> (
+    (_, opRemain) => {
+      opRemain
+      |> digitalParser
+      |> ((exp2, remain2) => Ok(onOk(exp1, exp2), remain2))
+      @<< (err => Error(err));
     }
-  | Error(e) => Js.Exn.raiseError(e)
-  };
+  )
+  @<< (err => Error(err));
 };
 
-parser(~input="1+2-3+4", ()) |> print |> Js.log;
-/* "0123456789" |> Js.String.includes("") |> Js.log; */
+let addParser = parserGenerator(isAddChar, (exp1, exp2) => Add(exp1, exp2));
+let minusParser =
+  parserGenerator(isMinusChar, (exp1, exp2) => Minus(exp1, exp2));
+
+let rec parser_ = (exp: expression, input: string): result(expression) => {
+  let expressionParser = addParser(exp) @| minusParser(exp);
+  input
+  |> emptyParser
+  |> ((_, _) => Ok(exp, input))
+  @<< (
+    input_ => {
+      input_ |> expressionParser |> parser_ @<< (err => Error(err));
+    }
+  );
+};
+
+let negativeDigitalParser = (input: string) => {
+  input
+  |> isMinusChar
+  |> (
+    (_, remain) => {
+      remain
+      |> digitalParser
+      |> ((d, remain2) => Ok(Minus(Digital("0"), d), remain2))
+      @<< (_ => Error(input));
+    }
+  )
+  @<< (_ => digitalParser(input));
+};
+let parser = (input: string) =>
+  input
+  |> emptyParser
+  |> ((_, _) => Error(input))
+  @<< negativeDigitalParser
+  |> parser_
+  @<< (_ => Error(input))
+  |> ((exp, _) => string_of_int(evaluate(exp)))
+  @<< (_ => "failed: " ++ input);
+
+let logParse = (input: string) => input |> parser |> Js.log;
+
+logParse("1e23e");
+logParse("123+1");
