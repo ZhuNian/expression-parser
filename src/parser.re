@@ -1,143 +1,93 @@
+open Js.String;
+open Utils;
 open Evaluate;
-type result('a) =
-  | Ok('a, string)
-  | Error(string);
+open Combinators;
 
-type parser = (expression, string) => result(expression);
-let (@|) = (p1, p2, input: string) => {
-  switch (p1(input)) {
-  | Ok(exp, remain) => Ok(exp, remain)
-  | Error(_) => p2(input)
+/**
+parsers
+ */
+let pChar = (charToMatch: string) => {
+  let innerFn = input => {
+    let firstChar = charAt(0, input);
+    if (charToMatch == firstChar) {
+      Ok((firstChar, slice(~from=1, ~to_=length(input), input)));
+    } else {
+      Error
+        ("expected: " ++ charToMatch ++ "; but got: " ++ input);
+        /* Error(
+             input,
+           ); */
+    };
   };
+  Parser(innerFn);
 };
 
-let (@<<) = (onOk, onError, res) => {
-  switch (res) {
-  | Ok(r, remain) => onOk(r, remain)
-  | Error(err) => onError(err)
-  };
-};
+let addCharParser = pChar("+");
+let minusCharParser = pChar("-");
+let emptyParser = pChar("");
+let digitalCharParser =
+  [|"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"|]
+  |> Js.Array.map(pChar)
+  |> anyOf;
 
-let isChar = (isChar_: string => bool, input: string) => {
-  let c = input |> Js.String.charAt(0);
-  if (isChar_(c)) {
-    Ok(c, input |> Js.String.slice(~from=1, ~to_=Js.String.length(input)));
-  } else {
-    Error(input);
-  };
-};
+let mapFn = (s1, s2) => s1 ++ s2;
+let addThen_ = (p1, p2) => lift2(mapFn, p1, p2);
+let (&&=) = addThen_;
 
-let isDigitalChar = isChar(c => "0123456789" |> Js.String.includes(c));
-let isAddChar = isChar(c => c == "+");
-let isMinusChar = isChar(c => c == "-");
-let isEmptyChar = isChar(c => c == "");
+let rec many = parser =>
+  parser
+  &&= {
+    let innerFn = input => {
+      input |> run(many(parser)) &!= (_ => Ok(("", input)));
+    };
+    Parser(innerFn);
+  }
+  &| emptyParser;
 
-let digitalParser_ = (input: string) => {
-  input
-  |> isDigitalChar
-  |> ((c, remain) => Ok(Digital(c), remain))
-  @<< (err => Error(err));
-};
+/* let input = "13456a";
+   let p = many(digitalCharParser);
+   switch (run(p, input)) {
+   | Ok((c, remain)) =>
+     "current:  " ++ c |> Js.log;
+     "remain:  " ++ remain |> Js.log;
+   | Error(_) => "failed" ++ input |> Js.log
+   }; */
 
-let emptyParser = (input: string) => {
-  input |> isEmptyChar |> ((_, _) => Ok("", input)) @<< (_ => Error(input));
-};
+/**
+  expression evaluate
+ */
+let positiveDigitalParser = many(digitalCharParser) &= (res => Digital(res));
+let digitalParser =
+  minusCharParser
+  &> positiveDigitalParser
+  &= (((_op, d)) => Minus(Digital("0"), d))
+  &| positiveDigitalParser;
 
-let rec many = (res, pChar, input: string) => {
-  input
-  |> emptyParser
-  |> ((_, _) => Error(input))
-  @<< (
-    e => {
-      e
-      |> pChar
-      |> (
-        (char_, remain) => {
-          remain
-          |> emptyParser
-          |> ((_, _) => Ok(res ++ char_, ""))
-          @<< (_ => many(res ++ char_, pChar, remain));
-        }
-      )
-      @<< (err => Ok(res, err));
-    }
-  );
-};
+let addParser =
+  digitalParser
+  &> addCharParser
+  &> positiveDigitalParser
+  &= ((((d1, _op), d2)) => Add(d1, d2));
 
-let digitalParser = (input: string) => {
-  input
-  |> many("", isDigitalChar)
-  |> (
-    (d, remain) => {
-      d
-      |> emptyParser
-      |> ((_, _) => Error(input))
-      @<< (_ => Ok(Digital(d), remain));
-    }
-  )
-  @<< (_ => Error(input));
-};
-
-let parserGenerator =
-    (
-      opSplitter,
-      onOk: (expression, expression) => expression,
-      exp1: expression,
-      input: string,
-    ) => {
-  input
-  |> opSplitter
-  |> (
-    (_, opRemain) => {
-      opRemain
-      |> digitalParser
-      |> ((exp2, remain2) => Ok(onOk(exp1, exp2), remain2))
-      @<< (err => Error(err));
-    }
-  )
-  @<< (err => Error(err));
-};
-
-let addParser = parserGenerator(isAddChar, (exp1, exp2) => Add(exp1, exp2));
 let minusParser =
-  parserGenerator(isMinusChar, (exp1, exp2) => Minus(exp1, exp2));
+  digitalParser
+  &> minusCharParser
+  &> positiveDigitalParser
+  &= ((((d1, _op), d2)) => Minus(d1, d2));
 
-let rec parser_ = (exp: expression, input: string): result(expression) => {
-  let expressionParser = addParser(exp) @| minusParser(exp);
-  input
-  |> emptyParser
-  |> ((_, _) => Ok(exp, input))
-  @<< (
-    input_ => {
-      input_ |> expressionParser |> parser_ @<< (err => Error(err));
+let expressionParser = addParser &| minusParser &| digitalParser;
+let rec parse = input => {
+  switch (input |> run(expressionParser)) {
+  | Ok((exp, remain)) =>
+    if (remain == "") {
+      string_of_int(evaluate(exp));
+    } else {
+      parse(string_of_int(evaluate(exp)) ++ remain);
     }
-  );
+  | Error(e) => "failed: " ++ e
+  };
 };
 
-let negativeDigitalParser = (input: string) => {
-  input
-  |> isMinusChar
-  |> (
-    (_, remain) => {
-      remain
-      |> digitalParser
-      |> ((d, remain2) => Ok(Minus(Digital("0"), d), remain2))
-      @<< (_ => Error(input));
-    }
-  )
-  @<< (_ => digitalParser(input));
-};
-let parser = (input: string) =>
-  input
-  |> emptyParser
-  |> ((_, _) => Error(input))
-  @<< negativeDigitalParser
-  |> parser_
-  @<< (_ => Error(input))
-  |> ((exp, _) => string_of_int(evaluate(exp)))
-  @<< (_ => "failed: " ++ input);
+let logParse = input => input |> parse |> Js.log;
 
-let logParse = (input: string) => input |> parser |> Js.log;
-
-logParse("1e23e");
-logParse("123+1");
+/* logParse("12+3-4"); */
